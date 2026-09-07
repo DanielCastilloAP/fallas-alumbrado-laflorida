@@ -1069,19 +1069,42 @@ function initMap(){
   searchResultLayerGroup = L.layerGroup().addTo(map);
 
 
-  map.on('moveend zoomend', cargarDatosDelArea);
-  map.on('zoomend', renderFallasOnMap);
+  map.on('moveend zoomend', cargarDatosDelAreaDebounced);
+  // El zoom no cambia qué fallas existen, solo su estilo (radio, umbral de cascada),
+  // así que solo se vuelve a dibujar con los datos ya descargados — sin ir a la red.
+  map.on('zoomend', renderFallasDesdeCache);
   cargarDatosDelArea();
   renderFallasOnMap();
 
   // refresco periódico de fallas (mientras llega Realtime real en Fase 4)
+  // Se pausa si la pestaña no está visible (usuario minimizado / en otra pestaña) para no gastar datos al pedo.
   setInterval(async () => {
+    if(document.hidden) return;
     cargarFallasDelArea();
     await renderFallasOnMap();
     if(document.getElementById('sidebarStats').style.display === 'flex'){
       fallasPeriodoLayerGroup.eachLayer(l => l.bringToFront());
     }
-  }, 6000);
+  }, 120000);
+}
+
+// ---------- Cache simple por zona (bbox) para las capas de área ----------
+// Evita volver a pedir circuitos/puntos/loteos/empalmes cuando el usuario
+// solo se desplaza un poco dentro de una zona que ya se descargó antes.
+const areaCache = { circuitos:null, puntos:null, loteos:null, empalmes:null };
+function expandirBbox(bbox, margen){
+  const w = bbox[2]-bbox[0], h = bbox[3]-bbox[1];
+  return [bbox[0]-w*margen, bbox[1]-h*margen, bbox[2]+w*margen, bbox[3]+h*margen];
+}
+function bboxContenido(exterior, interior){
+  return exterior && interior[0] >= exterior[0] && interior[1] >= exterior[1]
+    && interior[2] <= exterior[2] && interior[3] <= exterior[3];
+}
+
+let cargarDatosDelAreaTimeout = null;
+function cargarDatosDelAreaDebounced(){
+  clearTimeout(cargarDatosDelAreaTimeout);
+  cargarDatosDelAreaTimeout = setTimeout(cargarDatosDelArea, 250);
 }
 
 async function cargarDatosDelArea(){
@@ -1095,26 +1118,26 @@ async function cargarDatosDelArea(){
   toggleLayer(layerLoteos, z >= 19);
   toggleLayer(layerEmpalmes, z >= 19 && empalmesVisible);
 
-  if(z >= 17){
+  if(z >= 17 && !bboxContenido(areaCache.circuitos, bbox)){
     const data = await db.rpc('circuitos_en_area', {min_lon:bbox[0],min_lat:bbox[1],max_lon:bbox[2],max_lat:bbox[3]});
-    if(data){ layerCircuitos.clearLayers(); layerCircuitos.addData(data); }
+    if(data){ layerCircuitos.clearLayers(); layerCircuitos.addData(data); areaCache.circuitos = expandirBbox(bbox, 0.5); }
   }
   // Capa de calles desactivada temporalmente (ver línea de arriba); se deja de consultar para no gastar llamadas de más
   // if(z >= 14){
   //   const data = await db.rpc('calles_en_area', {min_lon:bbox[0],min_lat:bbox[1],max_lon:bbox[2],max_lat:bbox[3]});
   //   if(data){ layerCalles.clearLayers(); layerCalles.addData(data); }
   // }
-  if(z >= 17){
+  if(z >= 17 && !bboxContenido(areaCache.puntos, bbox)){
     const data = await db.rpc('puntos_en_area', {min_lon:bbox[0],min_lat:bbox[1],max_lon:bbox[2],max_lat:bbox[3]});
-    if(data){ ultimoPuntosGeoJSON = data; redibujarPuntos(); }
+    if(data){ ultimoPuntosGeoJSON = data; redibujarPuntos(); areaCache.puntos = expandirBbox(bbox, 0.5); }
   }
-  if(z >= 19){
+  if(z >= 19 && !bboxContenido(areaCache.loteos, bbox)){
     const data = await db.rpc('loteos_en_area', {min_lon:bbox[0],min_lat:bbox[1],max_lon:bbox[2],max_lat:bbox[3]});
-    if(data){ layerLoteos.clearLayers(); layerLoteos.addData(data); }
+    if(data){ layerLoteos.clearLayers(); layerLoteos.addData(data); areaCache.loteos = expandirBbox(bbox, 0.5); }
   }
-  if(z >= 19){
+  if(z >= 19 && !bboxContenido(areaCache.empalmes, bbox)){
     const data = await db.rpc('empalmes_en_area', {min_lon:bbox[0],min_lat:bbox[1],max_lon:bbox[2],max_lat:bbox[3]});
-    if(data){ layerEmpalmes.clearLayers(); layerEmpalmes.addData(data); }
+    if(data){ layerEmpalmes.clearLayers(); layerEmpalmes.addData(data); areaCache.empalmes = expandirBbox(bbox, 0.5); }
   }
   cargarFallasDelArea();
 }
@@ -1345,6 +1368,16 @@ async function renderFallasOnMap(){
   try{
     const geojson = await db.rpc('fallas_geojson', {});
     ultimoFallasGeoJSON = geojson;
+  }catch(e){ console.error('Error cargando fallas:', e); return; }
+  renderFallasDesdeCache();
+}
+
+// Vuelve a dibujar las fallas usando lo último descargado (ultimoFallasGeoJSON),
+// sin ir a la red. Se usa en cada zoom, porque el zoom solo cambia el estilo
+// (radio del punto, umbral de visibilidad de cascada), no qué fallas existen.
+function renderFallasDesdeCache(){
+  try{
+    const geojson = ultimoFallasGeoJSON;
     fallasLayerGroup.clearLayers();
     if(!geojson || !geojson.features) return;
     geojson.features.forEach(feat => {
@@ -1596,7 +1629,7 @@ async function abrirPopupFalla(feat){
         try{
           await db.update('fallas', `id=eq.${p.id}`, {asignado_camion_id: camionId});
           await guardarComentarioFalla(p.id, 'asignacion', comentario);
-          cargarFallasDelArea(); renderFallasOnMap();
+          cargarFallasDelArea(); renderFallasOnMap(); invalidarCacheTodasFallas();
           cerrarPanel();
         }catch(e){ alert('No se pudo asignar: ' + e.message); }
       };
@@ -1683,7 +1716,7 @@ async function marcarFallaPendiente(fallaId, motivo){
       motivo_pendiente: motivo
     });
     await guardarComentarioFalla(fallaId, 'pendiente', motivo);
-    cargarFallasDelArea(); renderFallasOnMap();
+    cargarFallasDelArea(); renderFallasOnMap(); invalidarCacheTodasFallas();
   }catch(e){ alert('No se pudo marcar como pendiente: ' + e.message); }
 }
 
@@ -1733,7 +1766,7 @@ async function crearFallaPunto(puntoGid, tipoFalla, cardinalidad, descripcionOtr
     if(informadoPorSesion) fila.informado_por = informadoPorSesion;
     const filaCreada = await db.insert('fallas', fila);
     if(filaCreada && filaCreada[0]) await guardarComentarioFalla(filaCreada[0].id, 'reporte', descripcionOtro);
-    cargarFallasDelArea(); renderFallasOnMap();
+    cargarFallasDelArea(); renderFallasOnMap(); invalidarCacheTodasFallas();
   }catch(e){ alert('Error al crear la falla: ' + e.message); }
 }
 
@@ -1764,7 +1797,7 @@ async function crearFallaCircuito(circuitoGid, tipoFalla, fechaCustom, descripci
       });
       await db.insert('fallas', filasCascada);
     }
-    cargarFallasDelArea(); renderFallasOnMap();
+    cargarFallasDelArea(); renderFallasOnMap(); invalidarCacheTodasFallas();
   }catch(e){ alert('Error al crear la falla: ' + e.message); }
 }
 
@@ -1813,7 +1846,7 @@ async function eliminarFallaPropia(fallaId){
   if(!confirm('¿Eliminar esta falla? Esta acción no se puede deshacer.')) return;
   try{
     await db.delete('fallas', `id=eq.${fallaId}`);
-    cargarFallasDelArea(); renderFallasOnMap();
+    cargarFallasDelArea(); renderFallasOnMap(); invalidarCacheTodasFallas();
   }catch(e){ alert('No se pudo eliminar: ' + e.message); }
 }
 window.eliminarFallaPropia = eliminarFallaPropia;
@@ -1847,7 +1880,7 @@ async function registrarReparacion(fallaId, descripcion){
     // Si era una falla de circuito, cerramos también los puntos individuales creados en cascada por ese circuito.
     await db.update('fallas', `circuito_origen_id=eq.${fallaId}`, { estado: 'reparada' });
     await guardarComentarioFalla(fallaId, 'reparacion', descripcion);
-    cargarFallasDelArea(); renderFallasOnMap();
+    cargarFallasDelArea(); renderFallasOnMap(); invalidarCacheTodasFallas();
   }catch(e){ alert('Error al registrar la reparación: ' + e.message); }
 }
 window.abrirFormularioReparacion = abrirFormularioReparacion;
@@ -1881,7 +1914,7 @@ document.getElementById('historialModoBtn').onclick = () => {
   btn.title = modoHistorial
     ? 'Modo historial ACTIVO — clic en un punto o circuito (clic aquí de nuevo para salir)'
     : 'Modo historial: clic en un punto o circuito para ver su historial';
-  renderFallasOnMap();
+  renderFallasDesdeCache();
 };
 document.getElementById('closeTodasBtn').onclick = () => cerrarModalTodas();
 document.getElementById('toggleExportBtn').onclick = () => {
@@ -1903,7 +1936,7 @@ function mostrarModalTodas(){
   document.getElementById('historialContenido').style.display = 'none';
   document.getElementById('toggleExportBtn').style.display = ['admin','ito','ito2','contratista'].includes(rolEfectivo()) ? 'inline-block' : 'none';
   document.getElementById('todasPanel').classList.add('visible');
-  cargarTodasFallas();
+  cargarTodasFallas(); // usa caché salvo que algo la haya invalidado (ver todasFallasCacheVigente)
   setTimeout(() => { if(map) map.invalidateSize(); }, 50);
 }
 function cerrarModalTodas(){
@@ -2090,22 +2123,43 @@ async function actualizarFechaFalla(fallaId, nuevoValor){
     const item = ultimosTodasFallas.find(x => x.id === fallaId);
     if(item) item.fecha_creacion = nuevaFechaIso;
     renderTodasFallasTabla();
-    cargarFallasDelArea(); renderFallasOnMap();
+    cargarFallasDelArea(); renderFallasOnMap(); invalidarCacheTodasFallas();
   }catch(e){ alert('No se pudo actualizar la fecha: ' + e.message); }
 }
 window.actualizarFechaFalla = actualizarFechaFalla;
 
 let ordenTodasFallas = {campo: 'fecha_creacion', asc: false};
 
+// "Todas las fallas" no cambia solo porque el admin abra y cierre el panel varias veces;
+// se vuelve a pedir solo la primera vez o después de crear/editar/eliminar una falla
+// (ver invalidarCacheTodasFallas, llamado desde esos flujos).
+let todasFallasCacheVigente = false;
+function invalidarCacheTodasFallas(){
+  todasFallasCacheVigente = false;
+  // Las cachés de estadísticas y de la capa de período (declaradas más abajo) también
+  // quedan obsoletas ante cualquier alta/edición/reparación/eliminación de una falla.
+  if(typeof cacheEstadisticasPorRango !== 'undefined'){
+    Object.keys(cacheEstadisticasPorRango).forEach(k => delete cacheEstadisticasPorRango[k]);
+  }
+  if(typeof cachePeriodoGeojsonPorRango !== 'undefined'){
+    Object.keys(cachePeriodoGeojsonPorRango).forEach(k => delete cachePeriodoGeojsonPorRango[k]);
+  }
+}
+
 async function cargarTodasFallas(){
   const tbody = document.getElementById('todasFallasTbody');
   const esAdmin = rolEfectivo() === 'admin';
   document.getElementById('thFechaReal').style.display = esAdmin ? 'table-cell' : 'none';
   document.getElementById('thIngresadoPorReal').style.display = esAdmin ? 'table-cell' : 'none';
+  if(todasFallasCacheVigente){
+    renderTodasFallasTabla();
+    return;
+  }
   tbody.innerHTML = '<tr><td colspan="11" style="padding:20px; text-align:center; color:var(--ink-soft);">Cargando...</td></tr>';
   try{
     const todas = await db.rpc('resumen_todas_fallas', {limite: 500});
     ultimosTodasFallas = todas || [];
+    todasFallasCacheVigente = true;
     ordenTodasFallas = {campo: 'fecha_creacion', asc: false};
     renderTodasFallasTabla();
   }catch(e){
@@ -2201,8 +2255,9 @@ async function eliminarDesdeTodas(fallaId){
   if(!confirm('¿Eliminar esta falla? Esta acción no se puede deshacer.')) return;
   try{
     await db.delete('fallas', `id=eq.${fallaId}`);
+    invalidarCacheTodasFallas();
     cargarTodasFallas();
-    cargarFallasDelArea(); renderFallasOnMap();
+    cargarFallasDelArea(); renderFallasOnMap(); invalidarCacheTodasFallas();
   }catch(e){ alert('No se pudo eliminar: ' + e.message); }
 }
 window.eliminarDesdeTodas = eliminarDesdeTodas;
@@ -2333,9 +2388,17 @@ function actualizarEstadisticasYMapa(){
 }
 
 // ---------- CAPA AZUL: fallas del período consultado (separada de las activas) ----------
+// Cacheada por rango de fechas: cambiar de pestaña o reabrir el panel con el mismo
+// rango no debe volver a descargar las mismas geometrías.
+const cachePeriodoGeojsonPorRango = {};
 async function renderFallasPeriodoEnMapa(fechaInicio, fechaFin){
+  const clave = fechaInicio + '|' + fechaFin;
   try{
-    const geojson = await db.rpc('fallas_geojson_periodo', {fecha_inicio: fechaInicio, fecha_fin: fechaFin});
+    let geojson = cachePeriodoGeojsonPorRango[clave];
+    if(!geojson){
+      geojson = await db.rpc('fallas_geojson_periodo', {fecha_inicio: fechaInicio, fecha_fin: fechaFin});
+      cachePeriodoGeojsonPorRango[clave] = geojson;
+    }
     fallasPeriodoLayerGroup.clearLayers();
     if(!geojson || !geojson.features) return;
     geojson.features.forEach(feat => {
@@ -2361,11 +2424,18 @@ function limpiarCapaPeriodo(){
   if(fallasPeriodoLayerGroup) fallasPeriodoLayerGroup.clearLayers();
 }
 
+// Cacheada por rango de fechas, misma razón que la capa azul de período.
+const cacheEstadisticasPorRango = {};
 async function cargarEstadisticas(fechaInicio, fechaFin){
   const content = document.getElementById('statsContent');
+  const clave = fechaInicio + '|' + fechaFin;
   content.innerHTML = '<div class="empty-state">Cargando...</div>';
   try{
-    const d = await db.rpc('estadisticas_fallas', {fecha_inicio: fechaInicio, fecha_fin: fechaFin});
+    let d = cacheEstadisticasPorRango[clave];
+    if(!d){
+      d = await db.rpc('estadisticas_fallas', {fecha_inicio: fechaInicio, fecha_fin: fechaFin});
+      cacheEstadisticasPorRango[clave] = d;
+    }
     const total = d.total_fallas || 0;
     const pct = (n) => total ? Math.round((n/total)*100) : 0;
     const entradasCodigo = Object.entries(d.por_codigo || {}).sort((a,b) => b[1]-a[1]);
