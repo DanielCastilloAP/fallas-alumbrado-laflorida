@@ -159,6 +159,7 @@
   .badge.pendiente{background:#fbf0dd;color:var(--amber);}
   .badge.reiterada{background:#f1e6f7;color:#8e44ad;}
   .badge.reparada{background:#e3f2e8;color:var(--green);}
+  .badge.asignacion{background:#eef4fb;color:#2563a8;}
   .falla-item .meta{color:var(--ink-soft);font-size:11px;}
   .falla-item button{font-size:10.5px;border:1px solid var(--line);background:#fff;padding:4px 8px;border-radius:6px;cursor:pointer;font-weight:600;margin-top:6px;}
   .empty-state{padding:30px 18px;text-align:center;color:var(--ink-soft);font-size:12.5px;line-height:1.6;}
@@ -723,7 +724,7 @@ function actualizarVisibilidadPorRol(){
   document.getElementById('reportSection').style.display = (rol === 'ito' || rol === 'ito2' || rol === 'admin') ? 'block' : 'none';
   document.getElementById('repararSection').style.display = ['contratista','camion'].includes(rol) ? 'block' : 'none';
   document.getElementById('statsBtn').style.display = rol === 'contratista' ? 'none' : 'inline-block';
-  document.getElementById('todasBtn').style.display = (rol === 'admin' || rol === 'ito' || rol === 'ito2') ? 'inline-block' : 'none';
+  document.getElementById('todasBtn').style.display = (rol === 'admin' || rol === 'ito' || rol === 'ito2' || rol === 'contratista') ? 'inline-block' : 'none';
   // si cambia el rol efectivo (ej. "ver como"), se sale de cualquier modo de reporte activo
   salirModoInformar();
 }
@@ -1426,6 +1427,18 @@ async function abrirPopupFalla(feat){
       if(filas && filas.length) p.descripcion_otro = filas[0].descripcion_otro;
     }catch(e){ console.error('No se pudo cargar el comentario:', e); }
   }
+  // Último comentario de asignación (el más reciente que haya dejado
+  // contratista/admin al asignar o reasignar la falla a un camión).
+  let ultimoComentarioAsignacion = null;
+  if(p.id){
+    try{
+      const filasComentario = await db.select(
+        'fallas_comentarios',
+        `falla_id=eq.${p.id}&tipo=eq.asignacion&select=comentario,autor_nombre,creado_en&order=creado_en.desc&limit=1`
+      );
+      if(filasComentario && filasComentario.length) ultimoComentarioAsignacion = filasComentario[0];
+    }catch(e){ console.error('No se pudo cargar el comentario de asignación:', e); }
+  }
   if(p.tipo === 'punto'){
     const [lon, lat] = feat.geometry.coordinates;
     resaltarPuntoConsulta(lat, lon);
@@ -1441,6 +1454,15 @@ async function abrirPopupFalla(feat){
   const infoComentario = p.descripcion_otro
     ? `<div class="hint" style="margin-top:4px;">Comentario:</div><div style="white-space:pre-line; font-weight:600; font-size:11.5px; color:var(--ink);">${p.descripcion_otro}</div>`
     : '';
+  const infoComentarioAsignacion = ultimoComentarioAsignacion ? (() => {
+    const fechaCom = new Date(ultimoComentarioAsignacion.creado_en).toLocaleString('es-CL',{day:'2-digit',month:'2-digit',year:'numeric',hour:'2-digit',minute:'2-digit'});
+    return `
+      <div style="margin-top:6px; padding:6px 8px; background:#eef4fb; border-left:3px solid #2563a8; border-radius:4px;">
+        <div class="hint" style="margin-bottom:2px;">💬 Comentario de Asignación — <b>${ultimoComentarioAsignacion.autor_nombre || '—'}</b> · ${fechaCom}</div>
+        <div style="white-space:pre-line; font-weight:600; font-size:11.5px; color:var(--ink);">${ultimoComentarioAsignacion.comentario}</div>
+      </div>
+    `;
+  })() : '';
   const infoGeneral = `
     <div class="hint" style="margin-top:6px;">Fecha y hora: <b>${fechaFalla}</b></div>
     <div class="hint">Duración: <b>${duracion}</b></div>
@@ -1448,6 +1470,7 @@ async function abrirPopupFalla(feat){
     <div class="hint">Puntos lumínicos afectados: <b>${p.puntos_afectados ?? '—'}</b></div>
     <div class="hint">Asignado a: <b>${p.asignado_camion_nombre || 'Sin asignar'}</b></div>
     ${infoComentario}
+    ${infoComentarioAsignacion}
   `;
   let infoReparacion = '';
   if(p.estado === 'reparada' && p.reparado_por_nombre){
@@ -1505,6 +1528,7 @@ async function abrirPopupFalla(feat){
       <select id="asignarCamionSelect" class="popup-input" style="width:100%; margin-bottom:6px;">
         <option value="">Cargando camiones...</option>
       </select>
+      <textarea class="popup-input" id="comentarioAsignacionInput" placeholder="Comentario de asignación (opcional, lo verá el camión)" style="width:100%; min-height:60px; box-sizing:border-box; margin-bottom:6px;"></textarea>
       <button class="popup-btn" id="confirmarAsignarCamionBtn" style="background:#2563a8;">Asignar</button>
     </div>
   ` : '';
@@ -1567,8 +1591,11 @@ async function abrirPopupFalla(feat){
     if(btnAsignar){
       btnAsignar.onclick = async () => {
         const camionId = panel.querySelector('#asignarCamionSelect').value || null;
+        const comentarioInput = panel.querySelector('#comentarioAsignacionInput');
+        const comentario = comentarioInput ? comentarioInput.value.trim() : '';
         try{
           await db.update('fallas', `id=eq.${p.id}`, {asignado_camion_id: camionId});
+          await guardarComentarioFalla(p.id, 'asignacion', comentario);
           cargarFallasDelArea(); renderFallasOnMap();
           cerrarPanel();
         }catch(e){ alert('No se pudo asignar: ' + e.message); }
@@ -1655,8 +1682,28 @@ async function marcarFallaPendiente(fallaId, motivo){
       fecha_pendiente: new Date().toISOString(),
       motivo_pendiente: motivo
     });
+    await guardarComentarioFalla(fallaId, 'pendiente', motivo);
     cargarFallasDelArea(); renderFallasOnMap();
   }catch(e){ alert('No se pudo marcar como pendiente: ' + e.message); }
+}
+
+// Guarda una copia de cualquier comentario relevante de una falla en
+// fallas_comentarios, para tener un único log histórico unificado
+// (reporte, asignación, pendiente, reparación). No reemplaza las
+// columnas propias de "fallas" que ya usa el resto de la app — es
+// puramente aditivo, así que si esta tabla no existe todavía o falla
+// por permisos, no debe interrumpir el flujo principal.
+async function guardarComentarioFalla(fallaId, tipo, comentario){
+  if(!comentario) return;
+  try{
+    await db.insert('fallas_comentarios', {
+      falla_id: fallaId,
+      tipo,
+      comentario,
+      autor_id: currentUser.id,
+      autor_nombre: currentUser.nombre
+    });
+  }catch(e){ console.error(`No se pudo guardar el comentario (${tipo}) en fallas_comentarios:`, e); }
 }
 
 
@@ -1684,7 +1731,8 @@ async function crearFallaPunto(puntoGid, tipoFalla, cardinalidad, descripcionOtr
     };
     if(fechaCustom) fila.fecha_falla = new Date(fechaCustom + 'T23:50:00-04:00').toISOString();
     if(informadoPorSesion) fila.informado_por = informadoPorSesion;
-    await db.insert('fallas', fila);
+    const filaCreada = await db.insert('fallas', fila);
+    if(filaCreada && filaCreada[0]) await guardarComentarioFalla(filaCreada[0].id, 'reporte', descripcionOtro);
     cargarFallasDelArea(); renderFallasOnMap();
   }catch(e){ alert('Error al crear la falla: ' + e.message); }
 }
@@ -1700,6 +1748,7 @@ async function crearFallaCircuito(circuitoGid, tipoFalla, fechaCustom, descripci
     if(informadoPorSesion) filaLineaObj.informado_por = informadoPorSesion;
     const filaLinea = await db.insert('fallas', filaLineaObj);
     const fallaLinea = filaLinea[0];
+    if(fallaLinea) await guardarComentarioFalla(fallaLinea.id, 'reporte', descripcionOtro);
 
     const puntos = await db.rpc('puntos_de_circuito', {circuito_gid: circuitoGid});
     if(puntos && puntos.length){
@@ -1797,6 +1846,7 @@ async function registrarReparacion(fallaId, descripcion){
     await db.update('fallas', `id=eq.${fallaId}`, { estado: 'reparada' });
     // Si era una falla de circuito, cerramos también los puntos individuales creados en cascada por ese circuito.
     await db.update('fallas', `circuito_origen_id=eq.${fallaId}`, { estado: 'reparada' });
+    await guardarComentarioFalla(fallaId, 'reparacion', descripcion);
     cargarFallasDelArea(); renderFallasOnMap();
   }catch(e){ alert('Error al registrar la reparación: ' + e.message); }
 }
@@ -1851,7 +1901,7 @@ function mostrarModalTodas(){
   document.getElementById('panelInferiorTitulo').textContent = 'Todas las fallas de la comuna';
   document.getElementById('todasContenido').style.display = 'block';
   document.getElementById('historialContenido').style.display = 'none';
-  document.getElementById('toggleExportBtn').style.display = ['admin','ito','ito2'].includes(rolEfectivo()) ? 'inline-block' : 'none';
+  document.getElementById('toggleExportBtn').style.display = ['admin','ito','ito2','contratista'].includes(rolEfectivo()) ? 'inline-block' : 'none';
   document.getElementById('todasPanel').classList.add('visible');
   cargarTodasFallas();
   setTimeout(() => { if(map) map.invalidateSize(); }, 50);
@@ -1879,8 +1929,26 @@ async function mostrarHistorial(tipoEntidad, gid, etiqueta){
       return;
     }
 
+    // Comentarios de asignación de todas las fallas de este punto/circuito
+    // (se guardan todos en el tiempo, no solo el último).
+    let comentariosPorFalla = {};
+    try{
+      const idsFallas = filas.map(f => f.id).filter(id => id !== undefined && id !== null);
+      if(idsFallas.length){
+        const comentarios = await db.select(
+          'fallas_comentarios',
+          `falla_id=in.(${idsFallas.join(',')})&tipo=eq.asignacion&select=falla_id,comentario,autor_nombre,creado_en&order=creado_en.asc`
+        );
+        comentarios.forEach(c => {
+          if(!comentariosPorFalla[c.falla_id]) comentariosPorFalla[c.falla_id] = [];
+          comentariosPorFalla[c.falla_id].push(c);
+        });
+      }
+    }catch(e){ console.error('No se pudieron cargar los comentarios de asignación:', e); }
+
     // Cada falla puede generar hasta 3 eventos distintos en la línea de tiempo:
     // cuándo se reportó, cuándo quedó pendiente, y cuándo se reparó.
+    // A eso se suman los comentarios de asignación registrados para esa falla.
     let eventos = [];
     filas.forEach(f => {
       const etiquetaCascada = f.cascada ? ' <span class="hint">(por cascada de circuito)</span>' : '';
@@ -1912,10 +1980,20 @@ async function mostrarHistorial(tipoEntidad, gid, etiqueta){
           detalle: f.descripcion_reparacion || '—'
         });
       }
+      (comentariosPorFalla[f.id] || []).forEach(c => {
+        eventos.push({
+          fecha: c.creado_en,
+          ot: f.ot || '—',
+          evento: 'Comentario de Asignación',
+          codigo: f.tipo_falla,
+          quien: c.autor_nombre || '—',
+          detalle: c.comentario
+        });
+      });
     });
     eventos.sort((a,b) => new Date(b.fecha) - new Date(a.fecha));
 
-    const claseEvento = (ev) => ev === 'Reportada' ? 'reportada' : ev === 'Dejada pendiente' ? 'pendiente' : 'reparada';
+    const claseEvento = (ev) => ev === 'Reportada' ? 'reportada' : ev === 'Dejada pendiente' ? 'pendiente' : ev === 'Comentario de Asignación' ? 'asignacion' : 'reparada';
     tbody.innerHTML = eventos.map(ev => {
       const fecha = new Date(ev.fecha).toLocaleString('es-CL',{day:'2-digit',month:'2-digit',year:'numeric',hour:'2-digit',minute:'2-digit'});
       return `<tr>
