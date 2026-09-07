@@ -1946,6 +1946,20 @@ async function mostrarHistorial(tipoEntidad, gid, etiqueta){
       }
     }catch(e){ console.error('No se pudieron cargar los comentarios de asignación:', e); }
 
+    // Comentario del inspector al reportar (columna descripcion_otro en fallas).
+    // La función historial_entidad no lo trae, así que se busca aparte.
+    let comentarioReporte = {};
+    try{
+      const idsFallas = filas.map(f => f.id).filter(id => id !== undefined && id !== null);
+      if(idsFallas.length){
+        const filasDesc = await db.select(
+          'fallas',
+          `id=in.(${idsFallas.join(',')})&select=id,descripcion_otro`
+        );
+        filasDesc.forEach(r => { if(r.descripcion_otro) comentarioReporte[r.id] = r.descripcion_otro; });
+      }
+    }catch(e){ console.error('No se pudo cargar el comentario de reporte:', e); }
+
     // Cada falla puede generar hasta 3 eventos distintos en la línea de tiempo:
     // cuándo se reportó, cuándo quedó pendiente, y cuándo se reparó.
     // A eso se suman los comentarios de asignación registrados para esa falla.
@@ -1958,7 +1972,7 @@ async function mostrarHistorial(tipoEntidad, gid, etiqueta){
         evento: 'Reportada',
         codigo: `${f.tipo_falla}${etiquetaCascada}`,
         quien: f.nombre_creador || '—',
-        detalle: '—'
+        detalle: comentarioReporte[f.id] || '—'
       });
       if(f.pendiente_por_nombre){
         eventos.push({
