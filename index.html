@@ -1714,7 +1714,7 @@ async function crearFallaCircuito(circuitoGid, tipoFalla, fechaCustom, descripci
 // ---------- LISTA Y REPARACIÓN (contratista) ----------
 async function cargarFallasDelArea(){
   try{
-    const query = 'select=id,ot,tipo,tipo_falla,estado,cascada,fecha_creacion:fecha_falla,creado_en:fecha_falla_real,creado_por,ref_punto_gid,ref_circuito_gid,usuarios!fallas_informado_por_fkey(nombre)'
+    const query = 'select=id,ot,tipo,tipo_falla,estado,cascada,descripcion_otro,fecha_creacion:fecha_falla,creado_en:fecha_falla_real,creado_por,ref_punto_gid,ref_circuito_gid,usuarios!fallas_informado_por_fkey(nombre)'
       + '&estado=neq.reparada&cascada=eq.false&order=fecha_falla.desc&limit=20';
     fallasEnArea = await db.select('fallas', query);
     renderFallasList();
@@ -1762,10 +1762,24 @@ async function eliminarFallaPropia(fallaId){
 window.eliminarFallaPropia = eliminarFallaPropia;
 
 function abrirFormularioReparacion(fallaId){
-  const desc = prompt('Describe la reparación realizada:');
-  if(desc === null) return;
-  if(!desc.trim()){ alert('La descripción no puede estar vacía.'); return; }
-  registrarReparacion(fallaId, desc.trim());
+  const f = (fallasEnArea || []).find(x => x.id === fallaId);
+  const infoComentario = (f && f.descripcion_otro)
+    ? `<div class="hint" style="margin-top:8px;">Comentario del inspector:</div>
+       <div style="white-space:pre-line; font-weight:600; font-size:11.5px; color:var(--ink); background:#f7f8f7; border-radius:6px; padding:8px;">${f.descripcion_otro}</div>`
+    : '';
+  const panel = mostrarPanel(`
+    <b>Registrar reparación</b>
+    ${f ? `<div class="hint" style="margin-top:2px;">${f.tipo === 'punto' ? 'Punto lumínico' : 'Circuito'} · Código ${f.tipo_falla}</div>` : ''}
+    ${infoComentario}
+    <textarea class="popup-input" id="descReparacion" placeholder="Describe la reparación realizada" style="margin-top:10px; min-height:80px;"></textarea>
+    <button class="popup-btn" id="confirmarReparacionBtn" style="margin-top:10px;">Confirmar reparación</button>
+  `);
+  panel.querySelector('#confirmarReparacionBtn').onclick = async () => {
+    const desc = panel.querySelector('#descReparacion').value.trim();
+    if(!desc){ alert('La descripción no puede estar vacía.'); return; }
+    await registrarReparacion(fallaId, desc);
+    cerrarPanel();
+  };
 }
 
 async function registrarReparacion(fallaId, descripcion){
