@@ -1931,9 +1931,10 @@ async function mostrarHistorial(tipoEntidad, gid, etiqueta){
 
     // Comentarios de asignación de todas las fallas de este punto/circuito
     // (se guardan todos en el tiempo, no solo el último).
+    // Nota: historial_entidad devuelve el id de la falla como "falla_id", no "id".
     let comentariosPorFalla = {};
     try{
-      const idsFallas = filas.map(f => f.id).filter(id => id !== undefined && id !== null);
+      const idsFallas = filas.map(f => f.falla_id).filter(id => id !== undefined && id !== null);
       if(idsFallas.length){
         const comentarios = await db.select(
           'fallas_comentarios',
@@ -1950,7 +1951,7 @@ async function mostrarHistorial(tipoEntidad, gid, etiqueta){
     // La función historial_entidad no lo trae, así que se busca aparte.
     let comentarioReporte = {};
     try{
-      const idsFallas = filas.map(f => f.id).filter(id => id !== undefined && id !== null);
+      const idsFallas = filas.map(f => f.falla_id).filter(id => id !== undefined && id !== null);
       if(idsFallas.length){
         const filasDesc = await db.select(
           'fallas',
@@ -1972,7 +1973,7 @@ async function mostrarHistorial(tipoEntidad, gid, etiqueta){
         evento: 'Reportada',
         codigo: `${f.tipo_falla}${etiquetaCascada}`,
         quien: f.nombre_creador || '—',
-        detalle: comentarioReporte[f.id] || '—'
+        detalle: comentarioReporte[f.falla_id] || '—'
       });
       if(f.pendiente_por_nombre){
         eventos.push({
@@ -1994,7 +1995,7 @@ async function mostrarHistorial(tipoEntidad, gid, etiqueta){
           detalle: f.descripcion_reparacion || '—'
         });
       }
-      (comentariosPorFalla[f.id] || []).forEach(c => {
+      (comentariosPorFalla[f.falla_id] || []).forEach(c => {
         eventos.push({
           fecha: c.creado_en,
           ot: f.ot || '—',
