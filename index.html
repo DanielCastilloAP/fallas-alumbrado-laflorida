@@ -1416,8 +1416,16 @@ function formatearDuracion(fechaInicio){
   return partes.length ? partes.join(' ') : '0 min';
 }
 
-function abrirPopupFalla(feat){
+async function abrirPopupFalla(feat){
   const p = feat.properties;
+  // El comentario puede no venir incluido en la función fallas_geojson de la base de datos;
+  // lo pedimos aparte directamente a la tabla "fallas" para asegurarnos de que siempre se vea.
+  if(p.descripcion_otro === undefined && p.id){
+    try{
+      const filas = await db.select('fallas', `id=eq.${p.id}&select=descripcion_otro`);
+      if(filas && filas.length) p.descripcion_otro = filas[0].descripcion_otro;
+    }catch(e){ console.error('No se pudo cargar el comentario:', e); }
+  }
   if(p.tipo === 'punto'){
     const [lon, lat] = feat.geometry.coordinates;
     resaltarPuntoConsulta(lat, lon);
